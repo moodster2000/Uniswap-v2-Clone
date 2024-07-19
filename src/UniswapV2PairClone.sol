@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.13;
 
-import "solady/tokens/ERC20.sol"; // Importing Solady's ERC20 implementation
-import "solady/utils/SafeTransferLib.sol"; // Importing Solady's SafeTransferLib for safe token transfers
-import "solady/utils/FixedPointMathLib.sol"; // Importing Solady's FixedPointMathLib for fixed-point math operations
+import "solady/tokens/ERC20.sol"; 
+import "solady/utils/SafeTransferLib.sol";
+import "solady/utils/FixedPointMathLib.sol";
 
-import "./UniswapV2FactoryClone.sol"; // Reference to the factory contract in the same project
+import "./UniswapV2FactoryClone.sol";
 import "./interfaces/IUniswapV2Callee.sol";
 import "./interfaces/IERC3156FlashBorrower.sol";
 import "./interfaces/IERC3156FlashLender.sol";
 import "forge-std/Test.sol";
 
-// Define the MINIMUM_LIQUIDITY constant
-uint256 constant MINIMUM_LIQUIDITY = 1000;
 
 contract UniswapV2Pair is ERC20, IERC3156FlashLender {
     using SafeTransferLib for address;
     using FixedPointMathLib for uint256;
+
+    uint256 constant MINIMUM_LIQUIDITY = 1000;
 
     uint256 private unlocked = 1;
 
@@ -78,7 +78,7 @@ contract UniswapV2Pair is ERC20, IERC3156FlashLender {
         uint32 blockTimestamp = uint32(block.timestamp % 2 ** 32);
         uint32 timeElapsed;
         unchecked {
-            timeElapsed = blockTimestamp - blockTimestampLast; // overflow is desired
+            timeElapsed = blockTimestamp - blockTimestampLast; 
         }
         if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
             unchecked {
