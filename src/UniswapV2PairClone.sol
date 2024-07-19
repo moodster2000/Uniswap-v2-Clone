@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.13;
 
-import "solady/tokens/ERC20.sol";
-import "solady/utils/SafeTransferLib.sol";
-import "solady/utils/Math.sol";
-import "./interfaces/IUniswapV2Callee.sol";
-import "./interfaces/IERC3156FlashLender.sol";
-import "./interfaces/IERC3156FlashBorrower.sol";
+import "solady/tokens/ERC20.sol"; // Importing Solady's ERC20 implementation
+import "solady/utils/SafeTransferLib.sol"; // Importing Solady's SafeTransferLib for safe token transfers
+import "solady/utils/FixedPointMathLib.sol"; // Importing Solady's FixedPointMathLib for fixed-point math operations
 
-contract UniswapV2Pair is ERC20 {
+import "./UniswapV2FactoryClone.sol"; // Reference to the factory contract in the same project
+import "./interfaces/IUniswapV2Callee.sol";
+import "./interfaces/IERC3156FlashBorrower.sol";
+import "./interfaces/IERC3156FlashLender.sol";
+import "forge-std/Test.sol";
+
+// Define the MINIMUM_LIQUIDITY constant
+uint256 constant MINIMUM_LIQUIDITY = 1000;
+
+contract UniswapV2Pair is ERC20, IERC3156FlashLender {
     using SafeTransferLib for address;
-    using Math for uint256;
+    using FixedPointMathLib for uint256;
 
     uint256 private unlocked = 1;
+
     modifier lock() {
         require(unlocked == 1, "UniswapV2: LOCKED");
         unlocked = 0;
@@ -24,9 +31,9 @@ contract UniswapV2Pair is ERC20 {
     address public token0;
     address public token1;
 
-    uint112 private reserve0;           
-    uint112 private reserve1;           
-    uint32  private blockTimestampLast; 
+    uint112 private reserve0;
+    uint112 private reserve1;
+    uint32 private blockTimestampLast;
 
     uint256 public price0CumulativeLast;
     uint256 public price1CumulativeLast;
@@ -44,8 +51,20 @@ contract UniswapV2Pair is ERC20 {
     );
     event Sync(uint112 reserve0, uint112 reserve1);
 
-    constructor() ERC20("Uniswap V2", "UNI-V2", 18) {
+    constructor() {
         factory = msg.sender;
+    }
+
+    function name() public view virtual override returns (string memory) {
+        return "Uniswap V2";
+    }
+
+    function symbol() public view virtual override returns (string memory) {
+        return "UNI-V2";
+    }
+
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
     }
 
     function initialize(address _token0, address _token1) external {
@@ -54,13 +73,21 @@ contract UniswapV2Pair is ERC20 {
         token1 = _token1;
     }
 
-    function _update(uint balance0, uint balance1, uint112 _reserve0, uint112 _reserve1) private {
+    function _update(uint256 balance0, uint256 balance1, uint112 _reserve0, uint112 _reserve1) private {
         require(balance0 <= type(uint112).max && balance1 <= type(uint112).max, "UniswapV2: OVERFLOW");
-        uint32 blockTimestamp = uint32(block.timestamp % 2**32);
-        uint32 timeElapsed = blockTimestamp - blockTimestampLast; // overflow is desired
+        uint32 blockTimestamp = uint32(block.timestamp % 2 ** 32);
+        uint32 timeElapsed;
+        unchecked {
+            timeElapsed = blockTimestamp - blockTimestampLast; // overflow is desired
+        }
         if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
-            price0CumulativeLast += uint(UQ112x112.encode(_reserve1).uqdiv(_reserve0)) * timeElapsed;
-            price1CumulativeLast += uint(UQ112x112.encode(_reserve0).uqdiv(_reserve1)) * timeElapsed;
+            unchecked {
+                // do unchecked
+                price0CumulativeLast +=
+                    uint256(FixedPointMathLib.mulDiv(uint256(_reserve1), 2 ** 112, uint256(_reserve0))) * timeElapsed;
+                price1CumulativeLast +=
+                    uint256(FixedPointMathLib.mulDiv(uint256(_reserve0), 2 ** 112, uint256(_reserve1))) * timeElapsed;
+            }
         }
         reserve0 = uint112(balance0);
         reserve1 = uint112(balance1);
@@ -69,17 +96,17 @@ contract UniswapV2Pair is ERC20 {
     }
 
     function _mintFee(uint112 _reserve0, uint112 _reserve1) private returns (bool feeOn) {
-        address feeTo = IUniswapV2Factory(factory).feeTo();
+        address feeTo = UniswapV2FactoryClone(factory).feeTo();
         feeOn = feeTo != address(0);
-        uint _kLast = kLast;
+        uint256 _kLast = kLast;
         if (feeOn) {
             if (_kLast != 0) {
-                uint rootK = Math.sqrt(uint(_reserve0).mul(_reserve1));
-                uint rootKLast = Math.sqrt(_kLast);
+                uint256 rootK = FixedPointMathLib.sqrt(uint256(_reserve0) * uint256(_reserve1));
+                uint256 rootKLast = FixedPointMathLib.sqrt(_kLast);
                 if (rootK > rootKLast) {
-                    uint numerator = totalSupply().mul(rootK.sub(rootKLast));
-                    uint denominator = rootK.mul(5).add(rootKLast);
-                    uint liquidity = numerator / denominator;
+                    uint256 numerator = totalSupply() * (rootK - rootKLast);
+                    uint256 denominator = (rootK * 5) + rootKLast;
+                    uint256 liquidity = numerator / denominator;
                     if (liquidity > 0) _mint(feeTo, liquidity);
                 }
             }
@@ -88,105 +115,94 @@ contract UniswapV2Pair is ERC20 {
         }
     }
 
-    function mint(address to) external lock returns (uint liquidity) {
+    function mint(address to) external lock returns (uint256 liquidity) {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
-        uint balance0 = IERC20(token0).balanceOf(address(this));
-        uint balance1 = IERC20(token1).balanceOf(address(this));
-        uint amount0 = balance0.sub(_reserve0);
-        uint amount1 = balance1.sub(_reserve1);
+        uint256 balance0 = ERC20(token0).balanceOf(address(this));
+        uint256 balance1 = ERC20(token1).balanceOf(address(this));
+        uint256 amount0 = balance0 - _reserve0;
+        uint256 amount1 = balance1 - _reserve1;
 
         bool feeOn = _mintFee(_reserve0, _reserve1);
-        uint _totalSupply = totalSupply();
+        uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
-            liquidity = Math.sqrt(amount0.mul(amount1)).sub(MINIMUM_LIQUIDITY);
-           _mint(address(0), MINIMUM_LIQUIDITY); // permanently lock the first MINIMUM_LIQUIDITY tokens
+            liquidity = FixedPointMathLib.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
+            _mint(address(0), MINIMUM_LIQUIDITY); // permanently lock the first MINIMUM_LIQUIDITY tokens
         } else {
-            liquidity = Math.min(amount0.mul(_totalSupply) / _reserve0, amount1.mul(_totalSupply) / _reserve1);
+            liquidity = FixedPointMathLib.min(amount0 * _totalSupply / _reserve0, amount1 * _totalSupply / _reserve1);
         }
         require(liquidity > 0, "UniswapV2: INSUFFICIENT_LIQUIDITY_MINTED");
         _mint(to, liquidity);
 
         _update(balance0, balance1, _reserve0, _reserve1);
-        if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
+        if (feeOn) kLast = uint256(reserve0) * uint256(reserve1); // reserve0 and reserve1 are up-to-date
         emit Mint(msg.sender, amount0, amount1);
     }
 
-    function burn(address to) external lock returns (uint amount0, uint amount1) {
+    function burn(address to) external lock returns (uint256 amount0, uint256 amount1) {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
-        address _token0 = token0;                               
-        address _token1 = token1;                               
-        uint balance0 = IERC20(_token0).balanceOf(address(this));
-        uint balance1 = IERC20(_token1).balanceOf(address(this));
-        uint liquidity = balanceOf(address(this));
+        address _token0 = token0;
+        address _token1 = token1;
+        uint256 balance0 = ERC20(_token0).balanceOf(address(this));
+        uint256 balance1 = ERC20(_token1).balanceOf(address(this));
+        uint256 liquidity = balanceOf(address(this));
 
         bool feeOn = _mintFee(_reserve0, _reserve1);
-        uint _totalSupply = totalSupply(); 
-        amount0 = liquidity.mul(balance0) / _totalSupply; 
-        amount1 = liquidity.mul(balance1) / _totalSupply; 
+        uint256 _totalSupply = totalSupply();
+        amount0 = liquidity * balance0 / _totalSupply;
+        amount1 = liquidity * balance1 / _totalSupply;
         require(amount0 > 0 && amount1 > 0, "UniswapV2: INSUFFICIENT_LIQUIDITY_BURNED");
         _burn(address(this), liquidity);
         _token0.safeTransfer(to, amount0);
         _token1.safeTransfer(to, amount1);
-        balance0 = IERC20(_token0).balanceOf(address(this));
-        balance1 = IERC20(_token1).balanceOf(address(this));
+        balance0 = ERC20(_token0).balanceOf(address(this));
+        balance1 = ERC20(_token1).balanceOf(address(this));
 
         _update(balance0, balance1, _reserve0, _reserve1);
-        if (feeOn) kLast = uint(reserve0).mul(reserve1); 
+        if (feeOn) kLast = uint256(reserve0) * uint256(reserve1);
         emit Burn(msg.sender, amount0, amount1, to);
     }
 
-    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, uint256 deadline) external lock {
+        require(block.timestamp <= deadline, "UniswapV2: EXPIRED");
         require(amount0Out > 0 || amount1Out > 0, "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT");
-        (uint112 _reserve0, uint112 _reserve1,) = getReserves(); 
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         require(amount0Out < _reserve0 && amount1Out < _reserve1, "UniswapV2: INSUFFICIENT_LIQUIDITY");
 
-        uint balance0;
-        uint balance1;
-        { // scope for _token{0,1}, avoids stack too deep errors
         address _token0 = token0;
         address _token1 = token1;
         require(to != _token0 && to != _token1, "UniswapV2: INVALID_TO");
-        if (amount0Out > 0) _token0.safeTransfer(to, amount0Out); 
-        if (amount1Out > 0) _token1.safeTransfer(to, amount1Out); 
-        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
-        balance0 = IERC20(_token0).balanceOf(address(this));
-        balance1 = IERC20(_token1).balanceOf(address(this));
-        }
-        uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
-        uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
-        require(amount0In > 0 || amount1In > 0, "UniswapV2: INSUFFICIENT_INPUT_AMOUNT");
-        { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
-        uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
-        uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
-        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), "UniswapV2: K");
-        }
 
-        _update(balance0, balance1, _reserve0, _reserve1);
-        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+        // Transfer output tokens
+        if (amount0Out > 0) _token0.safeTransfer(to, amount0Out);
+        if (amount1Out > 0) _token1.safeTransfer(to, amount1Out);
+
+        // Update balances and validate K
+        _updateBalancesAndValidateK(_reserve0, _reserve1, amount0Out, amount1Out, to);
     }
 
-    function flashLoan(
-        IERC3156FlashBorrower receiver,
-        address token,
-        uint256 amount,
-        bytes calldata data
-    ) external lock returns (bool) {
-        address _token0 = token0;
-        address _token1 = token1;
-        require(token == _token0 || token == _token1, "UniswapV2: INVALID_TOKEN");
+    function _updateBalancesAndValidateK(
+        uint112 _reserve0,
+        uint112 _reserve1,
+        uint256 amount0Out,
+        uint256 amount1Out,
+        address to
+    ) private returns (uint256 amount0In, uint256 amount1In) {
+        uint256 balance0 = ERC20(token0).balanceOf(address(this));
+        uint256 balance1 = ERC20(token1).balanceOf(address(this));
 
-        uint256 fee = (amount * 3) / 997 + 1;
-        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        IERC20(token).transfer(address(receiver), amount);
+        amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
+        amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
+        require(amount0In > 0 || amount1In > 0, "UniswapV2: INSUFFICIENT_INPUT_AMOUNT");
+
+        uint256 balance0Adjusted = balance0 * 1000 - amount0In * 3;
+        uint256 balance1Adjusted = balance1 * 1000 - amount1In * 3;
         require(
-            receiver.onFlashLoan(msg.sender, token, amount, fee, data) ==
-                keccak256("ERC3156FlashBorrower.onFlashLoan"),
-            "UniswapV2: INVALID_FLASHLOAN_CALLBACK"
+            balance0Adjusted * balance1Adjusted >= uint256(_reserve0) * uint256(_reserve1) * (1000 ** 2), "UniswapV2: K"
         );
-        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
-        require(balanceAfter >= balanceBefore + fee, "UniswapV2: INSUFFICIENT_FLASHLOAN_REPAYMENT");
+        // Update reserves
+        _update(balance0, balance1, _reserve0, _reserve1);
 
-        return true;
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
     function getReserves() public view returns (uint112 _reserve0, uint112 _reserve1, uint32 _blockTimestampLast) {
@@ -196,6 +212,44 @@ contract UniswapV2Pair is ERC20 {
     }
 
     function sync() external lock {
-        _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
+        _update(ERC20(token0).balanceOf(address(this)), ERC20(token1).balanceOf(address(this)), reserve0, reserve1);
+    }
+
+    // Flashloan functionality for ERC3156
+    function maxFlashLoan(address token) external view override returns (uint256) {
+        if (token == token0 || token == token1) {
+            return ERC20(token).balanceOf(address(this));
+        }
+        return 0;
+    }
+
+    // Add flashFee function here
+    function flashFee(address token, uint256 amount) public view override returns (uint256) {
+        require(token == token0 || token == token1, "UniswapV2: INVALID_TOKEN");
+        return amount * 3 / 1000; // 0.3% fee
+    }
+
+    // Move flashLoan function below flashFee function
+    function flashLoan(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
+        external
+        override
+        lock
+        returns (bool)
+    {
+        address _token0 = token0;
+        address _token1 = token1;
+        require(token == _token0 || token == _token1, "UniswapV2: INVALID_TOKEN");
+
+        uint256 fee = flashFee(token, amount);
+        uint256 balanceBefore = ERC20(token).balanceOf(address(this));
+        token.safeTransfer(address(receiver), amount);
+        require(
+            receiver.onFlashLoan(msg.sender, token, amount, fee, data) == keccak256("ERC3156FlashBorrower.onFlashLoan"),
+            "UniswapV2: INVALID_FLASHLOAN_CALLBACK"
+        );
+        uint256 balanceAfter = ERC20(token).balanceOf(address(this));
+        require(balanceAfter >= balanceBefore + fee, "UniswapV2: INSUFFICIENT_FLASHLOAN_REPAYMENT");
+
+        return true;
     }
 }
